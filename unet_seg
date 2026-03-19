@@ -1,0 +1,287 @@
+import os
+import cv2
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DefectDataset(Dataset):
+    def __init__(self, img_dir, mask_dir, size=256):
+        self.img_dir = img_dir
+        self.mask_dir = mask_dir
+        self.files = os.listdir(img_dir)
+        self.size = size
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        name = self.files[idx]
+
+        img = cv2.imread(os.path.join(self.img_dir, name), 0)
+        mask = cv2.imread(os.path.join(self.mask_dir, name), 0)
+
+        img = cv2.resize(img, (self.size, self.size))
+        mask = cv2.resize(mask, (self.size, self.size))
+
+        img = img.astype(np.float32) / 255.0
+        mask = (mask > 127).astype(np.float32)
+
+        img = np.expand_dims(img, 0)
+        mask = np.expand_dims(mask, 0)
+
+        return torch.tensor(img), torch.tensor(mask)
+    
+
+class SEBlock(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(c, c // 8),
+            nn.ReLU(),
+            nn.Linear(c // 8, c),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+
+class Block(nn.Module):
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_c, out_c, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_c)
+        self.conv2 = nn.Conv2d(out_c, out_c, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_c)
+        self.se = SEBlock(out_c)
+
+        self.short = nn.Identity() if in_c == out_c else nn.Conv2d(in_c, out_c, 1)
+
+    def forward(self, x):
+        s = self.short(x)
+        x = F.silu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        x = self.se(x)
+        return F.silu(x + s)
+    
+
+
+class UNet_Seg(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.enc1 = Block(1, 32)
+        self.enc2 = Block(32, 64)
+        self.enc3 = Block(64, 128)
+
+        self.pool = nn.MaxPool2d(2)
+
+        self.bottleneck = Block(128, 256)
+
+        self.up3 = nn.ConvTranspose2d(256, 128, 2, 2)
+        self.dec3 = Block(256, 128)
+
+        self.up2 = nn.ConvTranspose2d(128, 64, 2, 2)
+        self.dec2 = Block(128, 64)
+
+        self.up1 = nn.ConvTranspose2d(64, 32, 2, 2)
+        self.dec1 = Block(64, 32)
+
+        self.head = nn.Conv2d(32, 1, 1)
+
+    def forward(self, x):
+        x1 = self.enc1(x)
+        x2 = self.enc2(self.pool(x1))
+        x3 = self.enc3(self.pool(x2))
+
+        x4 = self.bottleneck(self.pool(x3))
+
+        d3 = self.dec3(torch.cat([self.up3(x4), x3], 1))
+        d2 = self.dec2(torch.cat([self.up2(d3), x2], 1))
+        d1 = self.dec1(torch.cat([self.up1(d2), x1], 1))
+
+        return self.head(d1)
+    
+def train_seg():
+
+    dataset = DefectDataset('dataset/images', 'dataset/masks')
+    loader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+    model = UNet_Seg().cuda()
+    opt = torch.optim.Adam(model.parameters(), 1e-3)
+    loss_fn = nn.BCEWithLogitsLoss()
+
+    for epoch in range(20):
+        for img, mask in loader:
+            img, mask = img.cuda(), mask.cuda()
+
+            pred = model(img)
+            loss = loss_fn(pred, mask)
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+        print("epoch done")
+
+    torch.save(model.state_dict(), "seg.pth")
+    
+    
+
+# class UNet_Seg(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+
+#         self.enc1 = Block(1, 32)
+#         self.enc2 = Block(32, 64)
+#         self.enc3 = Block(64, 128)
+
+#         self.pool = nn.MaxPool2d(2)
+
+#         self.bottleneck = Block(128, 256)
+
+#         self.up3 = nn.ConvTranspose2d(256, 128, 2, 2)
+#         self.dec3 = Block(256, 128)
+
+#         self.up2 = nn.ConvTranspose2d(128, 64, 2, 2)
+#         self.dec2 = Block(128, 64)
+
+#         self.up1 = nn.ConvTranspose2d(64, 32, 2, 2)
+#         self.dec1 = Block(64, 32)
+
+#         self.head = nn.Conv2d(32, 1, 1)
+
+#     def forward(self, x):
+#         x1 = self.enc1(x)
+#         x2 = self.enc2(self.pool(x1))
+#         x3 = self.enc3(self.pool(x2))
+
+#         x4 = self.bottleneck(self.pool(x3))
+
+#         d3 = self.dec3(torch.cat([self.up3(x4), x3], 1))
+#         d2 = self.dec2(torch.cat([self.up2(d3), x2], 1))
+#         d1 = self.dec1(torch.cat([self.up1(d2), x1], 1))
+
+#         return self.head(d1)
+# ✅ 训练
+# def train_seg():
+#     from torch.utils.data import DataLoader
+
+#     dataset = DefectDataset('dataset/images', 'dataset/masks')
+#     loader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+#     model = UNet_Seg().cuda()
+#     opt = torch.optim.Adam(model.parameters(), 1e-3)
+#     loss_fn = nn.BCEWithLogitsLoss()
+
+#     for epoch in range(20):
+#         for img, mask in loader:
+#             img, mask = img.cuda(), mask.cuda()
+
+#             pred = model(img)
+#             loss = loss_fn(pred, mask)
+
+#             opt.zero_grad()
+#             loss.backward()
+#             opt.step()
+
+#         print("epoch done")
+
+#     torch.save(model.state_dict(), "seg.pth")
+# ✅ 推理
+# def infer_seg(img_path):
+#     model = UNet_Seg().cuda()
+#     model.load_state_dict(torch.load("seg.pth"))
+#     model.eval()
+
+#     img = cv2.imread(img_path, 0)
+#     img = cv2.resize(img, (256,256)) / 255.0
+
+#     x = torch.tensor(img).unsqueeze(0).unsqueeze(0).float().cuda()
+
+#     with torch.no_grad():
+#         pred = torch.sigmoid(model(x))[0,0].cpu().numpy()
+
+#     mask = (pred > 0.5).astype(np.uint8) * 255
+#     cv2.imwrite("seg_result.png", mask)
+# 🔴 三、版本 B：强度版（推荐你最终用）
+# ✅ 模型（双头）
+# class UNet_Defect(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+
+#         self.backbone = UNet_Seg()
+
+#         self.seg_head = nn.Conv2d(1, 1, 1)
+#         self.reg_head = nn.Conv2d(1, 1, 1)
+
+#     def forward(self, x):
+#         feat = self.backbone(x)
+
+#         seg = self.seg_head(feat)
+#         reg = self.reg_head(feat)
+
+#         return seg, reg
+# ✅ 训练（关键）
+# def train_defect():
+#     from torch.utils.data import DataLoader
+
+#     dataset = DefectDataset('dataset/images', 'dataset/masks')
+#     loader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+#     model = UNet_Defect().cuda()
+
+#     bce = nn.BCEWithLogitsLoss()
+#     l1 = nn.L1Loss()
+
+#     opt = torch.optim.Adam(model.parameters(), 1e-3)
+
+#     for epoch in range(20):
+#         for img, mask in loader:
+#             img, mask = img.cuda(), mask.cuda()
+
+#             seg, reg = model(img)
+
+#             seg_loss = bce(seg, mask)
+
+#             # ⭐ 强度（只在缺陷区域学）
+#             reg_loss = l1(reg * mask, mask)
+
+#             loss = seg_loss + 0.5 * reg_loss
+
+#             opt.zero_grad()
+#             loss.backward()
+#             opt.step()
+
+#         print("epoch done")
+
+#     torch.save(model.state_dict(), "defect.pth")
+# ✅ 推理
+# def infer_defect(img_path):
+#     model = UNet_Defect().cuda()
+#     model.load_state_dict(torch.load("defect.pth"))
+#     model.eval()
+
+#     img = cv2.imread(img_path, 0)
+#     img = cv2.resize(img, (256,256)) / 255.0
+
+#     x = torch.tensor(img).unsqueeze(0).unsqueeze(0).float().cuda()
+
+#     with torch.no_grad():
+#         seg, reg = model(x)
+
+#         seg = torch.sigmoid(seg)[0,0].cpu().numpy()
+#         reg = reg[0,0].cpu().numpy()
+
+#     mask = (seg > 0.5).astype(np.uint8)
+
+#     value = reg * mask
+
+#     cv2.imwrite("mask.png", mask * 255)
+#     cv2.imwrite("value.png", (value * 255).astype(np.uint8))
