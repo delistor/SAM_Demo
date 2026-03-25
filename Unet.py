@@ -216,6 +216,64 @@ def inference(img_path):
 
     cv2.imwrite("pred.png", pred)
 
+# def inference(img_path, threshold=0.3, min_area=50):
+#     """
+#     img_path: 图片路径
+#     threshold: 预测阈值，越小越容易检测出微小缺陷，但误报会增加
+#     min_area: 面积阈值，过滤掉像素个数小于此值的干扰项
+#     """
+#     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+#     # 1. 模型初始化与加载
+#     model = UNet().to(device)
+#     model.load_state_dict(torch.load("model.pth", map_location=device))
+#     model.eval()
+
+#     # 2. 前处理
+#     img_raw = cv2.imread(img_path, 0)
+#     h_orig, w_orig = img_raw.shape
+#     img = cv2.resize(img_raw, (256, 256))
+#     img_input = img.astype(np.float32) / 255.0
+#     x = torch.tensor(img_input).unsqueeze(0).unsqueeze(0).to(device)
+
+#     # 3. 推理
+#     with torch.no_grad():
+#         output = model(x)
+#         pred_prob = torch.sigmoid(output)[0, 0].cpu().numpy()
+
+#     # 4. 后处理 - 阈值化
+#     # 工业缺陷检测通常将阈值设低一点（如 0.2 或 0.3）以防漏检
+#     pred_bin = (pred_prob > threshold).astype(np.uint8) * 255
+
+#     # 5. 后处理 - 尺寸恢复
+#     # 将 256x256 的预测图恢复到原图大小，确保像素对齐
+#     pred_bin = cv2.resize(pred_bin, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
+
+#     # 6. 后处理 - 形态学操作 (去噪)
+#     kernel = np.ones((3, 3), np.uint8)
+#     # 开运算：先腐蚀后膨胀，用于移除细小的白色噪点
+#     pred_bin = cv2.morphologyEx(pred_bin, cv2.MORPH_OPEN, kernel)
+    
+#     # 7. 后处理 - 面积过滤 (连通域分析)
+#     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(pred_bin, connectivity=8)
+    
+#     # 创建一个新的空画布
+#     clean_mask = np.zeros_like(pred_bin)
+#     for i in range(1, num_labels):  # 跳过索引0（背景）
+#         area = stats[i, cv2.CC_STAT_AREA]
+#         if area > min_area: # 只有面积足够大的才认为是缺陷
+#             clean_mask[labels == i] = 255
+
+#     # 8. 保存结果
+#     cv2.imwrite("pred_cleaned.png", clean_mask)
+    
+#     # 可选：将缺陷轮廓画在原图上观察效果
+#     contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#     res_img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2BGR)
+#     cv2.drawContours(res_img, contours, -1, (0, 0, 255), 2) # 用红色画出轮廓
+#     cv2.imwrite("overlay_result.png", res_img)
+
+#     print(f"检测完成，阈值: {threshold}, 过滤掉面积小于 {min_area} 的噪点。")
 
 if __name__ == "__main__":
     train()
